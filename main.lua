@@ -8,8 +8,8 @@ local SCRIPT_RAW_URL = "https://raw.githubusercontent.com/enroo1212-eng/omg/refs
 local MAX_SERVER_SEARCHES = math.huge -- unlimited searches
 local PLACE_ID = 131623223084840
 local MIN_PLAYERS = 1 -- minimum players to consider a server
-local MAX_PLAYERS = 4 -- maximum players for "lowest possible server"
-local RETRY_DELAY = 15 -- seconds to wait before retrying
+local MAX_PLAYERS = 6 -- maximum players for "lowest possible server"
+local RETRY_DELAY = 19 -- seconds to wait before retrying
 
 -- ==========================================
 -- SERVICES
@@ -201,8 +201,12 @@ local function hopServer()
         local cursor = nil
         local bestServer = nil
         local lowestPlayers = math.huge
+        local pageNumber = 0
 
         repeat
+            pageNumber = pageNumber + 1
+            debugPrint(string.format("Fetching page %d%s", pageNumber, cursor and " (cursor: "..cursor:sub(1,20).."...)" or " (first page)"))
+            
             -- Rate limiting protection
             local timeSinceLastRequest = tick() - lastRequestTime
             if timeSinceLastRequest < REQUEST_DELAY then
@@ -219,25 +223,43 @@ local function hopServer()
                 cursor and "&cursor="..cursor or ""
             )
 
-            local success, data = pcall(function()
-                return HttpService:JSONDecode(game:HttpGet(url))
+            local success, response = pcall(function()
+                return game:HttpGet(url)
             end)
 
             if not success then
-                debugPrint("API request failed, waiting 15s before retry...")
+                debugPrint("❌ API request failed: "..(response or "unknown error"))
+                debugPrint("Restarting from first page, waiting 15s...")
                 task.wait(RETRY_DELAY)
-                break
+                break -- Break out of repeat loop to restart from beginning
             end
 
-            if not data or not data.data then
-                debugPrint("Invalid response from API, waiting 15s...")
+            local data = nil
+            local parseSuccess = pcall(function()
+                data = HttpService:JSONDecode(response)
+            end)
+
+            if not parseSuccess or not data then
+                debugPrint("❌ Failed to parse JSON response")
+                debugPrint("Restarting from first page, waiting 15s...")
                 task.wait(RETRY_DELAY)
-                break
+                break -- Break out to restart from beginning
             end
+
+            if not data.data then
+                debugPrint("❌ Invalid response structure (no 'data' field)")
+                debugPrint("Restarting from first page, waiting 15s...")
+                task.wait(RETRY_DELAY)
+                break -- Break out to restart from beginning
+            end
+
+            debugPrint(string.format("Page %d loaded: %d servers found", pageNumber, #data.data))
 
             -- Find server with lowest player count that we haven't visited
+            local serversChecked = 0
             for _, server in ipairs(data.data) do
                 local playerCount = server.playing or 0
+                serversChecked = serversChecked + 1
                 
                 if not getgenv().VisitedServers[server.id] 
                     and playerCount >= MIN_PLAYERS 
@@ -246,14 +268,21 @@ local function hopServer()
                     
                     bestServer = server
                     lowestPlayers = playerCount
+                    debugPrint(string.format("Found candidate: %s (%d players)", server.id:sub(1,8).."...", playerCount))
                 end
             end
 
+            debugPrint(string.format("Checked %d servers on page %d", serversChecked, pageNumber))
+
+            -- Get next cursor if available
+            local previousCursor = cursor
             cursor = data.nextPageCursor
             
-            -- Small delay between pagination requests
             if cursor then
-                task.wait(0.5)
+                debugPrint(string.format("nextPageCursor found, continuing to page %d...", pageNumber + 1))
+                task.wait(0.5) -- Small delay between pagination requests
+            else
+                debugPrint("No nextPageCursor - reached end of server list")
             end
             
         until not cursor or bestServer
@@ -272,17 +301,17 @@ local function hopServer()
             end)
             
             if not teleportSuccess then
-                debugPrint("Teleport failed: "..(teleportErr or "unknown"))
+                debugPrint("❌ Teleport failed: "..(teleportErr or "unknown"))
                 getgenv().FailedAttempts = getgenv().FailedAttempts + 1
                 
                 debugPrint(string.format("Waiting %ds before next attempt...", RETRY_DELAY))
                 task.wait(RETRY_DELAY)
             else
-                debugPrint("Teleport initiated successfully!")
+                debugPrint("✅ Teleport initiated successfully!")
                 return -- Successfully initiated teleport
             end
         else
-            debugPrint(string.format("No suitable server found (1-%d players). Waiting %ds before retry...", MAX_PLAYERS, RETRY_DELAY))
+            debugPrint(string.format("❌ No suitable server found (1-%d players). Waiting %ds before retry...", MAX_PLAYERS, RETRY_DELAY))
             task.wait(RETRY_DELAY)
         end
     end
