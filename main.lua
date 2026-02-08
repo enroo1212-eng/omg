@@ -1,14 +1,14 @@
 -- ==========================================
--- CELESTIAL TIMER + SERVER HOP + WEBHOOK JOIN LINK
+-- CELESTIAL TIMER + SMART SERVER HOP + WEBHOOK
 -- ==========================================
 
 -- 🔧 CONFIG
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1470016492392419391/Hi4VRzHwtnggE-AmygcE5jJEl7goOcaMSUM-2uFPWvbCwifEiaZAm2Dc0uMjCqh6OC8j"
 local SCRIPT_RAW_URL = "https://raw.githubusercontent.com/enroo1212-eng/omg/refs/heads/main/main.lua"
-local MAX_SERVER_SEARCHES = 5 -- how many times to retry if no server found
-
--- Replace with your game ID
+local MAX_SERVER_SEARCHES = 10 -- increased retry count
 local PLACE_ID = 131623223084840
+local MIN_PLAYERS = 1 -- minimum players to consider a server
+local MAX_PLAYERS = 5 -- maximum players for "lowest possible server"
 
 -- ==========================================
 -- SERVICES
@@ -23,6 +23,7 @@ local LocalPlayer = Players.LocalPlayer
 -- ==========================================
 getgenv().VisitedServers = getgenv().VisitedServers or {}
 getgenv().CelestialTimer = getgenv().CelestialTimer or nil
+getgenv().FailedAttempts = getgenv().FailedAttempts or 0
 getgenv().VisitedServers[game.JobId] = true
 
 -- ==========================================
@@ -38,16 +39,29 @@ debugPrint("Script started on JobId: "..game.JobId)
 -- SELF QUEUE
 -- ==========================================
 local function queueSelf()
+    local success = false
+    
     if queue_on_teleport then
-        queue_on_teleport(game:HttpGet(SCRIPT_RAW_URL))
-        debugPrint("Queued self with queue_on_teleport")
-    elseif syn and syn.queue_on_teleport then
-        syn.queue_on_teleport(game:HttpGet(SCRIPT_RAW_URL))
-        debugPrint("Queued self with syn.queue_on_teleport")
-    else
-        debugPrint("queue_on_teleport not supported")
+        pcall(function()
+            queue_on_teleport(game:HttpGet(SCRIPT_RAW_URL))
+            success = true
+        end)
+        if success then debugPrint("Queued self with queue_on_teleport") end
+    end
+    
+    if not success and syn and syn.queue_on_teleport then
+        pcall(function()
+            syn.queue_on_teleport(game:HttpGet(SCRIPT_RAW_URL))
+            success = true
+        end)
+        if success then debugPrint("Queued self with syn.queue_on_teleport") end
+    end
+    
+    if not success then
+        debugPrint("Warning: queue_on_teleport not supported - script may not persist")
     end
 end
+
 queueSelf()
 
 -- ==========================================
@@ -60,31 +74,62 @@ local function parseTime(text)
 end
 
 local function getJoinLink(jobId)
-    return ("roblox://placeId=%d&gameInstanceId=%s"):format(PLACE_ID, jobId)
+    -- Create a proper game join link
+    return string.format("https://www.roblox.com/games/%d?privateServerLinkCode=%s", PLACE_ID, jobId)
 end
 
-local function sendWebhook(eventTime)
+local function sendWebhook(eventTime, jobId)
     debugPrint("Sending webhook with timer: "..eventTime.."s left")
+    
+    local timeStr = string.format("%02d:%02d", math.floor(eventTime/60), eventTime%60)
+    local joinLink = string.format("roblox://placeId=%d&gameInstanceId=%s", PLACE_ID, jobId)
+    
     local payload = {
         embeds = {{
-            title = "⏰ Celestial Timer Found",
-            description = "Time remaining: "..string.format("%02d:%02d", eventTime/60, eventTime%60),
+            title = "⏰ Celestial Timer Found!",
+            description = string.format("**Time Remaining:** `%s`\n**Server ID:** `%s`", timeStr, jobId),
             color = 0x8b5cf6,
             fields = {
-                { name = "🎮 Join Server", value = "[Click to Join]("..getJoinLink(game.JobId)..")", inline = false }
+                {
+                    name = "📍 Server Info",
+                    value = string.format("Players: %d\nServer: %s", #Players:GetPlayers(), game.JobId:sub(1, 8).."..."),
+                    inline = true
+                }
             },
-            footer = { text = "Celestial Timer Grabber" }
+            footer = { 
+                text = "Celestial Timer Finder • Click button below to join",
+                icon_url = "https://cdn.discordapp.com/emojis/1234567890.png"
+            },
+            timestamp = os.date("!%Y-%m-%dT%H:%M:%S")
+        }},
+        components = {{
+            type = 1,
+            components = {{
+                type = 2,
+                style = 5, -- Link button (external)
+                label = "🎮 Join Server",
+                url = joinLink
+            }}
         }}
     }
 
     local req = syn and syn.request or http_request or request
     if req then
-        req({
-            Url = WEBHOOK_URL,
-            Method = "POST",
-            Headers = { ["Content-Type"] = "application/json" },
-            Body = HttpService:JSONEncode(payload)
-        })
+        local success, err = pcall(function()
+            req({
+                Url = WEBHOOK_URL,
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode(payload)
+            })
+        end)
+        if success then
+            debugPrint("Webhook sent successfully!")
+        else
+            debugPrint("Webhook failed: "..(err or "unknown error"))
+        end
+    else
+        debugPrint("No HTTP request function available for webhook")
     end
 end
 
@@ -123,18 +168,32 @@ local function getCelestialTimer()
 end
 
 -- ==========================================
--- SERVER HOPPER USING PROVIDED API
+-- SMART SERVER HOPPER WITH RATE LIMITING
 -- ==========================================
 local function hopServer()
-    debugPrint("Searching for servers to hop to...")
+    debugPrint("Searching for lowest population servers...")
     local retries = 0
+    local lastRequestTime = 0
+    local REQUEST_DELAY = 2 -- seconds between API requests to avoid rate limiting
 
     while retries < MAX_SERVER_SEARCHES do
         local cursor = nil
-        local found = false
+        local bestServer = nil
+        local lowestPlayers = math.huge
 
         repeat
-            local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=100%s"):format(
+            -- Rate limiting protection
+            local timeSinceLastRequest = tick() - lastRequestTime
+            if timeSinceLastRequest < REQUEST_DELAY then
+                local waitTime = REQUEST_DELAY - timeSinceLastRequest
+                debugPrint(string.format("Rate limit protection: waiting %.1fs", waitTime))
+                task.wait(waitTime)
+            end
+            
+            lastRequestTime = tick()
+
+            local url = string.format(
+                "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=100%s",
                 PLACE_ID,
                 cursor and "&cursor="..cursor or ""
             )
@@ -143,45 +202,114 @@ local function hopServer()
                 return HttpService:JSONDecode(game:HttpGet(url))
             end)
 
-            if not success or not data then
-                debugPrint("Failed to fetch server list.")
+            if not success then
+                debugPrint("API request failed, waiting before retry...")
+                task.wait(5) -- longer wait on failure
                 break
             end
 
+            if not data or not data.data then
+                debugPrint("Invalid response from API")
+                break
+            end
+
+            -- Find server with lowest player count that we haven't visited
             for _, server in ipairs(data.data) do
-                if not getgenv().VisitedServers[server.id] then
-                    debugPrint("Hopping to server: "..server.id.." ("..server.playing.." players)")
-                    getgenv().VisitedServers[server.id] = true
-                    queueSelf()
-                    TeleportService:TeleportToPlaceInstance(PLACE_ID, server.id, Players.LocalPlayer)
-                    found = true
-                    break
+                local playerCount = server.playing or 0
+                
+                if not getgenv().VisitedServers[server.id] 
+                    and playerCount >= MIN_PLAYERS 
+                    and playerCount <= MAX_PLAYERS
+                    and playerCount < lowestPlayers then
+                    
+                    bestServer = server
+                    lowestPlayers = playerCount
                 end
             end
 
-            if found then return end
             cursor = data.nextPageCursor
-            task.wait(0.5)
-        until not cursor
+            
+            -- Small delay between pagination requests
+            if cursor then
+                task.wait(0.5)
+            end
+            
+        until not cursor or bestServer
+
+        -- If we found a suitable server, teleport to it
+        if bestServer then
+            debugPrint(string.format("Found optimal server: %s (%d players)", 
+                bestServer.id:sub(1, 8).."...", lowestPlayers))
+            
+            getgenv().VisitedServers[bestServer.id] = true
+            queueSelf()
+            
+            -- Attempt teleport with error handling
+            local teleportSuccess, teleportErr = pcall(function()
+                TeleportService:TeleportToPlaceInstance(PLACE_ID, bestServer.id, LocalPlayer)
+            end)
+            
+            if not teleportSuccess then
+                debugPrint("Teleport failed: "..(teleportErr or "unknown"))
+                getgenv().FailedAttempts = getgenv().FailedAttempts + 1
+                
+                -- If too many failures, wait longer
+                if getgenv().FailedAttempts > 3 then
+                    debugPrint("Multiple teleport failures, waiting 10s...")
+                    task.wait(10)
+                end
+            else
+                return -- Successfully initiated teleport
+            end
+        end
 
         retries = retries + 1
-        debugPrint("Retrying server search ("..retries.."/"..MAX_SERVER_SEARCHES..")")
-        task.wait(1)
+        debugPrint(string.format("Retry %d/%d - no suitable server found", retries, MAX_SERVER_SEARCHES))
+        task.wait(3) -- wait between retry attempts
     end
 
-    debugPrint("Could not find a suitable server after retries.")
+    debugPrint("Exhausted all retry attempts. Trying fallback teleport...")
+    
+    -- Fallback: just teleport to the place without specific instance
+    pcall(function()
+        queueSelf()
+        TeleportService:Teleport(PLACE_ID, LocalPlayer)
+    end)
 end
+
+-- ==========================================
+-- RECONNECT ON FAILURE
+-- ==========================================
+local function setupReconnect()
+    game:GetService("CoreGui").RobloxPromptGui.promptOverlay.ChildAdded:Connect(function(prompt)
+        if prompt.Name == "ErrorPrompt" then
+            debugPrint("Disconnect detected, attempting reconnect...")
+            task.wait(1)
+            queueSelf()
+            TeleportService:Teleport(PLACE_ID, LocalPlayer)
+        end
+    end)
+end
+
+pcall(setupReconnect) -- Setup disconnect handler
 
 -- ==========================================
 -- MAIN FLOW
 -- ==========================================
+task.wait(2) -- Initial delay to ensure workspace is loaded
+
+debugPrint("Checking for celestial timer...")
 local timer = getCelestialTimer()
+
 if timer then
     getgenv().CelestialTimer = timer
-    sendWebhook(timer)
-    debugPrint("Timer saved globally, now hopping to next server...")
+    sendWebhook(timer, game.JobId)
+    debugPrint("Timer found and webhook sent! Continuing to search other servers...")
+    task.wait(2) -- Brief delay before hopping
     hopServer()
 else
-    debugPrint("No timer found, hopping to next server...")
+    debugPrint("No timer in this server, hopping to next...")
     hopServer()
 end
+
+debugPrint("Script execution complete")
