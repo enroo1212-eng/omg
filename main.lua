@@ -10,9 +10,9 @@ local MAX_SERVER_SEARCHES = math.huge -- unlimited searches
 local PLACE_ID = 131623223084840
 local MIN_PLAYERS = 1 -- minimum players to consider a server
 local MAX_PLAYERS = 6 -- maximum players for "lowest possible server"
-local RETRY_DELAY = 15 -- seconds to wait before retrying
+local RETRY_DELAY = 20 -- seconds to wait before retrying
 local SERVER_LIMIT = 100 -- back to 100 since rate limits apply regardless
-local RATE_LIMIT_WAIT = 60 -- wait 60 seconds if we get 429 error
+local RATE_LIMIT_WAIT = 70 -- wait 60 seconds if we get 429 error
 
 -- ==========================================
 -- SERVICES
@@ -384,143 +384,95 @@ end
 -- SMART SERVER HOPPER WITH WORKSPACE CACHING
 -- ==========================================
 local function hopServer()
-    debugPrint("Searching for lowest population servers (unlimited attempts)...")
+    debugPrint("Starting server hop process...")
     local attempts = 0
     local lastRequestTime = 0
-    local REQUEST_DELAY = 3 -- increased delay between requests
+    local REQUEST_DELAY = 3 -- delay between requests
 
     while true do -- infinite loop for unlimited searches
         attempts = attempts + 1
         debugPrint(string.format("========== Search attempt #%d ==========", attempts))
         
         local serverList = {}
-        local needsRefetch = false
         
         -- Try to load from workspace cache first
         local cachedServers = loadServersFromCache()
         
         if cachedServers and #cachedServers > 0 then
-            debugPrint(string.format("Using cached server list (%d servers)", #cachedServers))
+            debugPrint(string.format("✅ Using cached server list (%d servers)", #cachedServers))
             serverList = cachedServers
         else
-            debugPrint("No valid cache found. Fetching fresh server list from API...")
-            needsRefetch = true
-        end
-        
-        -- Fetch new server list if needed
-        if needsRefetch then
-            local cursor = nil
-            local pageNumber = 0
-            local totalFetched = 0
-            local maxPages = 10 -- limit pages to avoid too many requests
-            local freshServers = {}
+            debugPrint("📡 No valid cache. Fetching 100 servers from API...")
             
-            repeat
-                pageNumber = pageNumber + 1
+            -- Rate limiting protection
+            local timeSinceLastRequest = tick() - lastRequestTime
+            if timeSinceLastRequest < REQUEST_DELAY then
+                local waitTime = REQUEST_DELAY - timeSinceLastRequest
+                debugPrint(string.format("⏳ Rate limit protection: waiting %.1fs", waitTime))
+                task.wait(waitTime)
+            end
+            
+            lastRequestTime = tick()
+
+            -- Fetch ONLY 100 servers (no pagination, just one request)
+            local url = string.format(
+                "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=100",
+                PLACE_ID
+            )
+
+            local success, response = pcall(function()
+                return game:HttpGet(url)
+            end)
+
+            if not success then
+                local errorMsg = tostring(response)
+                debugPrint("❌ API request failed: "..errorMsg)
                 
-                if pageNumber > maxPages then
-                    debugPrint(string.format("Reached max pages (%d), stopping fetch", maxPages))
-                    break
-                end
-                
-                debugPrint(string.format("📡 Fetching page %d (limit: %d servers per page)", pageNumber, SERVER_LIMIT))
-                
-                -- Rate limiting protection
-                local timeSinceLastRequest = tick() - lastRequestTime
-                if timeSinceLastRequest < REQUEST_DELAY then
-                    local waitTime = REQUEST_DELAY - timeSinceLastRequest
-                    debugPrint(string.format("⏳ Rate limit protection: waiting %.1fs", waitTime))
-                    task.wait(waitTime)
-                end
-                
-                lastRequestTime = tick()
-
-                local url = string.format(
-                    "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=%d%s",
-                    PLACE_ID,
-                    SERVER_LIMIT,
-                    cursor and "&cursor="..cursor or ""
-                )
-
-                local success, response = pcall(function()
-                    return game:HttpGet(url)
-                end)
-
-                if not success then
-                    local errorMsg = tostring(response)
-                    debugPrint("❌ API request failed: "..errorMsg)
-                    
-                    -- Check for 429 rate limit error
-                    if errorMsg:match("429") or errorMsg:match("Too Many Requests") then
-                        debugPrint(string.format("⚠️ RATE LIMITED (429)! Waiting %d seconds...", RATE_LIMIT_WAIT))
-                        task.wait(RATE_LIMIT_WAIT)
-                        break -- Break out to retry from beginning
-                    else
-                        debugPrint(string.format("Waiting %ds before retry...", RETRY_DELAY))
-                        task.wait(RETRY_DELAY)
-                        break
-                    end
-                end
-
-                local data = nil
-                local parseSuccess = pcall(function()
-                    data = HttpService:JSONDecode(response)
-                end)
-
-                if not parseSuccess or not data then
-                    debugPrint("❌ Failed to parse JSON response")
-                    debugPrint(string.format("Waiting %ds before retry...", RETRY_DELAY))
-                    task.wait(RETRY_DELAY)
-                    break
-                end
-
-                if not data.data then
-                    debugPrint("❌ Invalid response structure (no 'data' field)")
-                    debugPrint(string.format("Waiting %ds before retry...", RETRY_DELAY))
-                    task.wait(RETRY_DELAY)
-                    break
-                end
-
-                debugPrint(string.format("✅ Page %d loaded: %d servers found", pageNumber, #data.data))
-                
-                -- Add servers to fresh list
-                for _, server in ipairs(data.data) do
-                    table.insert(freshServers, server)
-                    totalFetched = totalFetched + 1
-                end
-
-                cursor = data.nextPageCursor
-                
-                if cursor then
-                    debugPrint(string.format("➡️ nextPageCursor found, will fetch page %d...", pageNumber + 1))
-                    task.wait(1) -- Wait between pagination requests
+                -- Check for 429 rate limit error
+                if errorMsg:match("429") or errorMsg:match("Too Many Requests") then
+                    debugPrint(string.format("⚠️ RATE LIMITED (429)! Waiting %d seconds...", RATE_LIMIT_WAIT))
+                    task.wait(RATE_LIMIT_WAIT)
                 else
-                    debugPrint("🏁 No nextPageCursor - reached end of server list")
+                    debugPrint(string.format("Waiting %ds before retry...", RETRY_DELAY))
+                    task.wait(RETRY_DELAY)
                 end
-                
-            until not cursor
+                -- Retry from beginning
+                continue
+            end
+
+            local data = nil
+            local parseSuccess = pcall(function()
+                data = HttpService:JSONDecode(response)
+            end)
+
+            if not parseSuccess or not data or not data.data then
+                debugPrint("❌ Failed to parse JSON response")
+                debugPrint(string.format("Waiting %ds before retry...", RETRY_DELAY))
+                task.wait(RETRY_DELAY)
+                continue
+            end
+
+            debugPrint(string.format("✅ Fetched %d servers from API", #data.data))
             
-            if totalFetched > 0 then
-                debugPrint(string.format("✅ Fetched %d servers total from API", totalFetched))
-                saveServersToCache(freshServers)
-                serverList = freshServers
+            -- Save to cache
+            if #data.data > 0 then
+                saveServersToCache(data.data)
+                serverList = data.data
             else
-                debugPrint(string.format("❌ No servers fetched, waiting %ds before retry...", RETRY_DELAY))
+                debugPrint("❌ No servers returned from API")
                 task.wait(RETRY_DELAY)
                 continue
             end
         end
         
-        -- Now search through the server list (cached or fresh)
+        -- Search through the server list for suitable server
         local bestServer = nil
         local lowestPlayers = math.huge
-        local serversChecked = 0
         
         debugPrint(string.format("🔍 Scanning %d servers for low population (%d-%d players)...", #serverList, MIN_PLAYERS, MAX_PLAYERS))
         
         for _, server in ipairs(serverList) do
             local playerCount = server.playing or 0
-            serversChecked = serversChecked + 1
             
             if not getgenv().VisitedServers[server.id] 
                 and playerCount >= MIN_PLAYERS 
@@ -533,34 +485,30 @@ local function hopServer()
             end
         end
 
-        debugPrint(string.format("📊 Checked %d servers from list", serversChecked))
-
         -- If we found a suitable server, teleport to it
         if bestServer then
-            debugPrint(string.format("✅ Found optimal server: %s (%d players)", 
+            debugPrint(string.format("✅ TELEPORTING to server: %s (%d players)", 
                 bestServer.id:sub(1, 8).."...", lowestPlayers))
             
             getgenv().VisitedServers[bestServer.id] = true
             queueSelf()
             
-            -- Attempt teleport with error handling
+            -- Attempt teleport
             local teleportSuccess, teleportErr = pcall(function()
                 TeleportService:TeleportToPlaceInstance(PLACE_ID, bestServer.id, LocalPlayer)
             end)
             
             if not teleportSuccess then
                 debugPrint("❌ Teleport failed: "..(teleportErr or "unknown"))
-                getgenv().FailedAttempts = getgenv().FailedAttempts + 1
-                
                 debugPrint(string.format("Waiting %ds before next attempt...", RETRY_DELAY))
                 task.wait(RETRY_DELAY)
             else
                 debugPrint("✅ Teleport initiated successfully!")
-                return -- Successfully initiated teleport
+                return -- Exit function after successful teleport
             end
         else
-            debugPrint(string.format("❌ No suitable server found in list (%d-%d players)", MIN_PLAYERS, MAX_PLAYERS))
-            debugPrint("Clearing cache to fetch fresh servers...")
+            debugPrint(string.format("❌ No suitable server found (%d-%d players)", MIN_PLAYERS, MAX_PLAYERS))
+            debugPrint("🗑️ Clearing cache to get fresh servers...")
             clearCache()
             debugPrint(string.format("Waiting %ds before retry...", RETRY_DELAY))
             task.wait(RETRY_DELAY)
