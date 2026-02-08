@@ -1,11 +1,10 @@
 -- ==========================================
--- FULL SELF-QUEUING EVENT TRACKER + SERVER HOP
+-- FULL SELF-QUEUING EVENT TRACKER + SERVER HOP (WITH DEBUG)
 -- ==========================================
 
 -- 🔧 CONFIG
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1470016492392419391/Hi4VRzHwtnggE-AmygcE5jJEl7goOcaMSUM-2uFPWvbCwifEiaZAm2Dc0uMjCqh6OC8j"
 local ALERT_TIME = 120 -- seconds (2 minutes)
-local HOP_DELAY = 2 -- seconds between hops
 local SCRIPT_RAW_URL = "https://raw.githubusercontent.com/enroo1212-eng/omg/refs/heads/main/main.lua" -- this script raw URL
 
 -- ==========================================
@@ -26,13 +25,26 @@ getgenv().AlertSent = getgenv().AlertSent or false
 getgenv().VisitedServers[game.JobId] = true
 
 -- ==========================================
+-- DEBUG FUNCTION
+-- ==========================================
+local function debugPrint(msg)
+    print("[EventTracker] "..msg)
+end
+
+debugPrint("Script started on JobId: "..game.JobId)
+
+-- ==========================================
 -- SELF QUEUE ON TELEPORT
 -- ==========================================
 local function queueSelf()
     if queue_on_teleport then
         queue_on_teleport(game:HttpGet(SCRIPT_RAW_URL))
+        debugPrint("Queued self with queue_on_teleport")
     elseif syn and syn.queue_on_teleport then
         syn.queue_on_teleport(game:HttpGet(SCRIPT_RAW_URL))
+        debugPrint("Queued self with syn.queue_on_teleport")
+    else
+        debugPrint("queue_on_teleport not supported")
     end
 end
 queueSelf() -- queue immediately
@@ -67,6 +79,8 @@ local function sendWebhook(eventName, secondsLeft)
         }}
     }
 
+    debugPrint("Sending webhook for event: "..eventName.." ("..secondsLeft.."s left)")
+
     local req = syn and syn.request or http_request or request
     if req then
         req({
@@ -75,6 +89,8 @@ local function sendWebhook(eventName, secondsLeft)
             Headers = { ["Content-Type"] = "application/json" },
             Body = HttpService:JSONEncode(payload)
         })
+    else
+        debugPrint("Executor does not support HTTP requests.")
     end
 end
 
@@ -82,20 +98,26 @@ end
 -- WATCH EVENT TIMERS
 -- ==========================================
 local function watchEventTimers()
+    debugPrint("Looking for EventTimers in workspace...")
     local EventTimers = workspace:WaitForChild("EventTimers", 10)
-    if not EventTimers then return false end
+    if not EventTimers then
+        debugPrint("No EventTimers found in workspace.")
+        return false
+    end
 
     for _, obj in ipairs(EventTimers:GetChildren()) do
         local gui = obj:FindFirstChild("SurfaceGui")
         local frame = gui and gui:FindFirstChild("Frame")
         local label = frame and frame:FindFirstChild("TextLabel2")
         if label then
+            debugPrint("Found event label: "..label.Name)
             local function check()
                 if getgenv().AlertSent then return end
                 local clean = label.Text:gsub("<[^>]+>", "")
                 local seconds = parseTime(clean)
                 if seconds and seconds <= ALERT_TIME then
                     local eventName = clean:match("(.+)%sEVENT") or "EVENT"
+                    debugPrint("Event detected! Time left: "..seconds.."s, sending webhook.")
                     sendWebhook(eventName, seconds)
                 end
             end
@@ -105,6 +127,7 @@ local function watchEventTimers()
             return true
         end
     end
+    debugPrint("No valid event labels found in this server.")
     return false
 end
 
@@ -112,32 +135,43 @@ end
 -- SERVER HOPPER
 -- ==========================================
 local function hopServer()
+    debugPrint("Looking for servers to hop to...")
     local url = ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100"):format(game.PlaceId)
     local success, data = pcall(function()
         return HttpService:JSONDecode(game:HttpGet(url))
     end)
-    if not success or not data then return end
+    if not success or not data then
+        debugPrint("Failed to get server list")
+        return
+    end
 
     for _, server in ipairs(data.data) do
-        if server.playing < 8 and not getgenv().VisitedServers[server.id] then
+        if server.playing >= 8 then
+            debugPrint("Skipping full server: "..server.id.." ("..server.playing.."/8)")
+        elseif getgenv().VisitedServers[server.id] then
+            debugPrint("Skipping visited server: "..server.id)
+        else
+            debugPrint("Hopping to server: "..server.id.." ("..server.playing.."/8)")
             getgenv().VisitedServers[server.id] = true
-
-            -- queue self again for next server
             queueSelf()
-
-            task.wait(HOP_DELAY)
             TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
             return
         end
     end
+
+    debugPrint("No suitable servers found to hop.")
 end
 
+-- ==========================================
 -- MAIN FLOW
+-- ==========================================
+debugPrint("Starting main flow...")
 if not getgenv().AlertSent then
     local foundTimer = watchEventTimers()
     if not foundTimer then
-        -- Only hop if no event timer exists
+        debugPrint("No event found, attempting server hop...")
         hopServer()
+    else
+        debugPrint("Event found, tracking timer...")
     end
 end
-
