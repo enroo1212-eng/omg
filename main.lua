@@ -1,10 +1,11 @@
 -- ==========================================
--- CELESTIAL TIMER GRAB + SERVER HOP + SELF QUEUE
+-- CELESTIAL TIMER GRAB + FULL SERVER HOP + SELF QUEUE + JOIN BUTTON
 -- ==========================================
 
 -- 🔧 CONFIG
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1470016492392419391/Hi4VRzHwtnggE-AmygcE5jJEl7goOcaMSUM-2uFPWvbCwifEiaZAm2Dc0uMjCqh6OC8j"
 local SCRIPT_RAW_URL = "https://raw.githubusercontent.com/enroo1212-eng/omg/refs/heads/main/main.lua"
+local MAX_PLAYERS_PER_SERVER = 8 -- adjust if needed
 
 -- ==========================================
 -- SERVICES
@@ -57,6 +58,10 @@ local function parseTime(text)
     return tonumber(m) * 60 + tonumber(s)
 end
 
+local function getJoinLink()
+    return ("roblox://placeId=%d&gameInstanceId=%s"):format(game.PlaceId, game.JobId)
+end
+
 local function sendWebhook(eventTime)
     debugPrint("Sending webhook with timer: "..eventTime.."s left")
     local payload = {
@@ -64,6 +69,9 @@ local function sendWebhook(eventTime)
             title = "⏰ Celestial Timer Found",
             description = "Time remaining: "..string.format("%02d:%02d", eventTime/60, eventTime%60),
             color = 0x8b5cf6,
+            fields = {
+                { name = "🎮 Join Server", value = "[Click to Join](" .. getJoinLink() .. ")", inline = false }
+            },
             footer = { text = "Celestial Timer Grabber" }
         }}
     }
@@ -116,34 +124,53 @@ local function getCelestialTimer()
 end
 
 -- ==========================================
--- SERVER HOPPER
+-- SERVER HOPPER WITH PAGING + SORTING
 -- ==========================================
 local function hopServer()
     debugPrint("Searching for servers to hop to...")
-    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100"):format(game.PlaceId)
-    local success, data = pcall(function()
-        return HttpService:JSONDecode(game:HttpGet(url))
-    end)
-    if not success or not data then
-        debugPrint("Failed to fetch server list.")
-        return
-    end
+    local cursor = nil
 
-    for _, server in ipairs(data.data) do
-        if server.playing >= 8 then
-            debugPrint("Skipping full server: "..server.id.." ("..server.playing.."/8)")
-        elseif getgenv().VisitedServers[server.id] then
-            debugPrint("Skipping visited server: "..server.id)
-        else
-            debugPrint("Hopping to server: "..server.id.." ("..server.playing.."/8)")
-            getgenv().VisitedServers[server.id] = true
-            queueSelf()
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
+    while true do
+        local url = ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100%s"):format(
+            game.PlaceId,
+            cursor and "&cursor="..cursor or ""
+        )
+
+        local success, data = pcall(function()
+            return HttpService:JSONDecode(game:HttpGet(url))
+        end)
+
+        if not success or not data then
+            debugPrint("Failed to fetch server list.")
             return
         end
-    end
 
-    debugPrint("No suitable servers found to hop.")
+        -- sort servers by least players first
+        table.sort(data.data, function(a, b) return a.playing < b.playing end)
+
+        local found = false
+        for _, server in ipairs(data.data) do
+            if server.playing < MAX_PLAYERS_PER_SERVER and not getgenv().VisitedServers[server.id] then
+                debugPrint("Hopping to server: "..server.id.." ("..server.playing.."/"..MAX_PLAYERS_PER_SERVER..")")
+                getgenv().VisitedServers[server.id] = true
+                queueSelf()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
+                found = true
+                break
+            end
+        end
+
+        if found then return end
+
+        -- no server found yet, check if there is a next page
+        if not data.nextPageCursor then
+            debugPrint("No suitable servers found after checking all pages.")
+            return
+        end
+        cursor = data.nextPageCursor
+        debugPrint("No server found yet, fetching next page...")
+        task.wait(0.5)
+    end
 end
 
 -- ==========================================
