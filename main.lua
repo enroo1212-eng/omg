@@ -1,11 +1,14 @@
 -- ==========================================
--- CELESTIAL TIMER GRAB + FULL SERVER HOP + SELF QUEUE + JOIN BUTTON
+-- CELESTIAL TIMER + SERVER HOP + WEBHOOK JOIN LINK
 -- ==========================================
 
 -- 🔧 CONFIG
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1470016492392419391/Hi4VRzHwtnggE-AmygcE5jJEl7goOcaMSUM-2uFPWvbCwifEiaZAm2Dc0uMjCqh6OC8j"
 local SCRIPT_RAW_URL = "https://raw.githubusercontent.com/enroo1212-eng/omg/refs/heads/main/main.lua"
-local MAX_PLAYERS_PER_SERVER = 8 -- adjust if needed
+local MAX_SERVER_SEARCHES = 5 -- how many times to retry if no server found
+
+-- Replace with your game ID
+local PLACE_ID = 131623223084840
 
 -- ==========================================
 -- SERVICES
@@ -19,13 +22,11 @@ local LocalPlayer = Players.LocalPlayer
 -- GLOBAL STATE
 -- ==========================================
 getgenv().VisitedServers = getgenv().VisitedServers or {}
-getgenv().CelestialTimer = getgenv().CelestialTimer or nil -- stores latest timer in seconds
-
--- mark current server as visited
+getgenv().CelestialTimer = getgenv().CelestialTimer or nil
 getgenv().VisitedServers[game.JobId] = true
 
 -- ==========================================
--- DEBUG FUNCTION
+-- DEBUG
 -- ==========================================
 local function debugPrint(msg)
     print("[CelestialFinder] "..msg)
@@ -58,8 +59,8 @@ local function parseTime(text)
     return tonumber(m) * 60 + tonumber(s)
 end
 
-local function getJoinLink()
-    return ("roblox://placeId=%d&gameInstanceId=%s"):format(game.PlaceId, game.JobId)
+local function getJoinLink(jobId)
+    return ("roblox://placeId=%d&gameInstanceId=%s"):format(PLACE_ID, jobId)
 end
 
 local function sendWebhook(eventTime)
@@ -70,7 +71,7 @@ local function sendWebhook(eventTime)
             description = "Time remaining: "..string.format("%02d:%02d", eventTime/60, eventTime%60),
             color = 0x8b5cf6,
             fields = {
-                { name = "🎮 Join Server", value = "[Click to Join](" .. getJoinLink() .. ")", inline = false }
+                { name = "🎮 Join Server", value = "[Click to Join]("..getJoinLink(game.JobId)..")", inline = false }
             },
             footer = { text = "Celestial Timer Grabber" }
         }}
@@ -103,9 +104,7 @@ local function getCelestialTimer()
         if frame then
             for _, label in ipairs(frame:GetChildren()) do
                 if label:IsA("TextLabel") and label.Text:match("CELESTIAL") then
-                    -- Remove RichText tags
                     local cleanText = label.Text:gsub("<[^>]+>", "")
-                    -- Extract "APPEARS IN XX:XX"
                     local timeStr = cleanText:match("APPEARS IN (%d%d:%d%d)")
                     if timeStr then
                         local seconds = parseTime(timeStr)
@@ -124,53 +123,53 @@ local function getCelestialTimer()
 end
 
 -- ==========================================
--- SERVER HOPPER WITH PAGING + SORTING
+-- SERVER HOPPER USING PROVIDED API
 -- ==========================================
 local function hopServer()
     debugPrint("Searching for servers to hop to...")
-    local cursor = nil
+    local retries = 0
 
-    while true do
-        local url = ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100%s"):format(
-            game.PlaceId,
-            cursor and "&cursor="..cursor or ""
-        )
-
-        local success, data = pcall(function()
-            return HttpService:JSONDecode(game:HttpGet(url))
-        end)
-
-        if not success or not data then
-            debugPrint("Failed to fetch server list.")
-            return
-        end
-
-        -- sort servers by least players first
-        table.sort(data.data, function(a, b) return a.playing < b.playing end)
-
+    while retries < MAX_SERVER_SEARCHES do
+        local cursor = nil
         local found = false
-        for _, server in ipairs(data.data) do
-            if server.playing < MAX_PLAYERS_PER_SERVER and not getgenv().VisitedServers[server.id] then
-                debugPrint("Hopping to server: "..server.id.." ("..server.playing.."/"..MAX_PLAYERS_PER_SERVER..")")
-                getgenv().VisitedServers[server.id] = true
-                queueSelf()
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
-                found = true
+
+        repeat
+            local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=100%s"):format(
+                PLACE_ID,
+                cursor and "&cursor="..cursor or ""
+            )
+
+            local success, data = pcall(function()
+                return HttpService:JSONDecode(game:HttpGet(url))
+            end)
+
+            if not success or not data then
+                debugPrint("Failed to fetch server list.")
                 break
             end
-        end
 
-        if found then return end
+            for _, server in ipairs(data.data) do
+                if not getgenv().VisitedServers[server.id] then
+                    debugPrint("Hopping to server: "..server.id.." ("..server.playing.." players)")
+                    getgenv().VisitedServers[server.id] = true
+                    queueSelf()
+                    TeleportService:TeleportToPlaceInstance(PLACE_ID, server.id, Players.LocalPlayer)
+                    found = true
+                    break
+                end
+            end
 
-        -- no server found yet, check if there is a next page
-        if not data.nextPageCursor then
-            debugPrint("No suitable servers found after checking all pages.")
-            return
-        end
-        cursor = data.nextPageCursor
-        debugPrint("No server found yet, fetching next page...")
-        task.wait(0.5)
+            if found then return end
+            cursor = data.nextPageCursor
+            task.wait(0.5)
+        until not cursor
+
+        retries = retries + 1
+        debugPrint("Retrying server search ("..retries.."/"..MAX_SERVER_SEARCHES..")")
+        task.wait(1)
     end
+
+    debugPrint("Could not find a suitable server after retries.")
 end
 
 -- ==========================================
