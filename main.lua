@@ -1,11 +1,12 @@
 -- ==========================================
--- FULL EVENT TIMER TRACKER + SERVER HOP + QUEUE
+-- FULL SELF-QUEUING EVENT TRACKER + SERVER HOP
 -- ==========================================
 
 -- 🔧 CONFIG
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1470016492392419391/Hi4VRzHwtnggE-AmygcE5jJEl7goOcaMSUM-2uFPWvbCwifEiaZAm2Dc0uMjCqh6OC8j"
 local ALERT_TIME = 120 -- seconds (2 minutes)
-local HOP_DELAY = 2 -- seconds between checking servers
+local HOP_DELAY = 2 -- seconds between hops
+local SCRIPT_RAW_URL = "https://raw.githubusercontent.com/enroo1212-eng/omg/refs/heads/main/main.lua" -- this script raw URL
 
 -- ==========================================
 -- SERVICES
@@ -21,8 +22,20 @@ local LocalPlayer = Players.LocalPlayer
 getgenv().VisitedServers = getgenv().VisitedServers or {}
 getgenv().AlertSent = getgenv().AlertSent or false
 
--- Mark current server as visited
+-- mark current server as visited
 getgenv().VisitedServers[game.JobId] = true
+
+-- ==========================================
+-- SELF QUEUE ON TELEPORT
+-- ==========================================
+local function queueSelf()
+    if queue_on_teleport then
+        queue_on_teleport(game:HttpGet(SCRIPT_RAW_URL))
+    elseif syn and syn.queue_on_teleport then
+        syn.queue_on_teleport(game:HttpGet(SCRIPT_RAW_URL))
+    end
+end
+queueSelf() -- queue immediately
 
 -- ==========================================
 -- UTILITIES
@@ -96,7 +109,7 @@ local function watchEventTimers()
 end
 
 -- ==========================================
--- SERVER HOPPER (SKIP FULL / SKIP VISITED)
+-- SERVER HOPPER
 -- ==========================================
 local function hopServer()
     local url = ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100"):format(game.PlaceId)
@@ -109,12 +122,8 @@ local function hopServer()
         if server.playing < 8 and not getgenv().VisitedServers[server.id] then
             getgenv().VisitedServers[server.id] = true
 
-            -- Queue the same script for next server
-            if queue_on_teleport then
-                queue_on_teleport(game:HttpGet("https://raw.githubusercontent.com/enroo1212-eng/omg/refs/heads/main/main.lua"))
-            elseif syn and syn.queue_on_teleport then
-                syn.queue_on_teleport(game:HttpGet("https://raw.githubusercontent.com/enroo1212-eng/omg/refs/heads/main/main.lua"))
-            end
+            -- queue self again for next server
+            queueSelf()
 
             task.wait(HOP_DELAY)
             TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
@@ -123,12 +132,12 @@ local function hopServer()
     end
 end
 
--- ==========================================
--- MAIN
--- ==========================================
+-- MAIN FLOW
 if not getgenv().AlertSent then
     local foundTimer = watchEventTimers()
     if not foundTimer then
+        -- Only hop if no event timer exists
         hopServer()
     end
 end
+
