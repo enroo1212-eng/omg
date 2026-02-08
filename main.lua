@@ -10,8 +10,8 @@ local MAX_SERVER_SEARCHES = math.huge -- unlimited searches
 local PLACE_ID = 131623223084840
 local MIN_PLAYERS = 1 -- minimum players to consider a server
 local MAX_PLAYERS = 6 -- maximum players for "lowest possible server"
-local RETRY_DELAY = 15 -- seconds to wait before retrying
-local SERVER_LIMIT = 100 -- reduced from 100 to avoid rate limits
+local RETRY_DELAY = 18 -- seconds to wait before retrying
+local SERVER_LIMIT = 100 -- back to 100 since rate limits apply regardless
 local RATE_LIMIT_WAIT = 60 -- wait 60 seconds if we get 429 error
 
 -- ==========================================
@@ -28,9 +28,101 @@ local LocalPlayer = Players.LocalPlayer
 getgenv().VisitedServers = getgenv().VisitedServers or {}
 getgenv().CelestialTimer = getgenv().CelestialTimer or nil
 getgenv().FailedAttempts = getgenv().FailedAttempts or 0
-getgenv().CachedServerList = getgenv().CachedServerList or {} -- Cache server list to avoid refetching
-getgenv().LastCacheTime = getgenv().LastCacheTime or 0
+getgenv().BestTimerFound = getgenv().BestTimerFound or nil
+getgenv().BestTimerJobId = getgenv().BestTimerJobId or nil
 getgenv().VisitedServers[game.JobId] = true
+
+-- ==========================================
+-- SERVER CACHE SYSTEM (STORED IN WORKSPACE)
+-- ==========================================
+local CACHE_DURATION = 180 -- 3 minutes in seconds
+local ServerCacheFolder = workspace:FindFirstChild("ServerCache") or Instance.new("Folder")
+ServerCacheFolder.Name = "ServerCache"
+ServerCacheFolder.Parent = workspace
+
+-- Function to save servers to workspace
+local function saveServersToCache(servers)
+    debugPrint(string.format("💾 Saving %d servers to workspace cache...", #servers))
+    
+    -- Clear old cache
+    ServerCacheFolder:ClearAllChildren()
+    
+    -- Create timestamp file
+    local timestampValue = Instance.new("NumberValue")
+    timestampValue.Name = "CacheTimestamp"
+    timestampValue.Value = tick()
+    timestampValue.Parent = ServerCacheFolder
+    
+    -- Create delete time indicator
+    local deleteTime = Instance.new("StringValue")
+    deleteTime.Name = "DeleteAt"
+    deleteTime.Value = os.date("%H:%M:%S", tick() + CACHE_DURATION)
+    deleteTime.Parent = ServerCacheFolder
+    
+    -- Save each server as a StringValue
+    for i, server in ipairs(servers) do
+        local serverValue = Instance.new("StringValue")
+        serverValue.Name = "Server_"..i
+        serverValue.Value = HttpService:JSONEncode(server)
+        serverValue.Parent = ServerCacheFolder
+    end
+    
+    debugPrint(string.format("✅ Cache saved at %s (will delete at %s)", 
+        os.date("%H:%M:%S", timestampValue.Value),
+        deleteTime.Value
+    ))
+end
+
+-- Function to load servers from workspace cache
+local function loadServersFromCache()
+    local timestampValue = ServerCacheFolder:FindFirstChild("CacheTimestamp")
+    
+    if not timestampValue then
+        debugPrint("❌ No cache timestamp found")
+        return nil
+    end
+    
+    local cacheAge = tick() - timestampValue.Value
+    local deleteIn = CACHE_DURATION - cacheAge
+    
+    debugPrint(string.format("📂 Cache found from %s (%.0fs ago)", 
+        os.date("%H:%M:%S", timestampValue.Value), 
+        cacheAge
+    ))
+    
+    if cacheAge > CACHE_DURATION then
+        debugPrint(string.format("🗑️ Cache expired (%.0fs old, max %ds). Deleting...", cacheAge, CACHE_DURATION))
+        ServerCacheFolder:ClearAllChildren()
+        return nil
+    end
+    
+    debugPrint(string.format("⏱️ Cache valid. Auto-delete in %.0fs (at %s)", 
+        deleteIn,
+        os.date("%H:%M:%S", timestampValue.Value + CACHE_DURATION)
+    ))
+    
+    -- Load servers from cache
+    local servers = {}
+    for _, child in ipairs(ServerCacheFolder:GetChildren()) do
+        if child:IsA("StringValue") and child.Name:match("^Server_") then
+            local success, server = pcall(function()
+                return HttpService:JSONDecode(child.Value)
+            end)
+            if success and server then
+                table.insert(servers, server)
+            end
+        end
+    end
+    
+    debugPrint(string.format("✅ Loaded %d servers from cache", #servers))
+    return servers
+end
+
+-- Function to clear cache
+local function clearCache()
+    debugPrint("🗑️ Clearing server cache...")
+    ServerCacheFolder:ClearAllChildren()
+end
 
 -- ==========================================
 -- DEBUG
@@ -74,7 +166,8 @@ queueSelf()
 -- UTILITIES
 -- ==========================================
 local function parseTime(text)
-    local m, s = text:match("(%d%d):(%d%d)")
+    -- Handle both MM:SS and M:SS formats
+    local m, s = text:match("(%d+):(%d+)")
     if not m or not s then return nil end
     return tonumber(m) * 60 + tonumber(s)
 end
@@ -237,19 +330,45 @@ local function getCelestialTimer()
         return nil
     end
 
+    debugPrint("EventTimers folder found, checking children...")
+    
     for _, obj in ipairs(EventTimers:GetChildren()) do
+        debugPrint("Checking object: "..obj.Name)
         local gui = obj:FindFirstChild("SurfaceGui")
         local frame = gui and gui:FindFirstChild("Frame")
         if frame then
+            debugPrint("Found Frame, checking TextLabels...")
             for _, label in ipairs(frame:GetChildren()) do
-                if label:IsA("TextLabel") and label.Text:match("CELESTIAL") then
-                    local cleanText = label.Text:gsub("<[^>]+>", "")
-                    local timeStr = cleanText:match("APPEARS IN (%d%d:%d%d)")
-                    if timeStr then
-                        local seconds = parseTime(timeStr)
-                        if seconds then
-                            debugPrint("Found celestial timer: "..seconds.."s")
-                            return seconds
+                if label:IsA("TextLabel") then
+                    local text = label.Text
+                    debugPrint("TextLabel found with text: '"..text.."'")
+                    
+                    if text:match("CELESTIAL") then
+                        debugPrint("⭐ Found CELESTIAL label!")
+                        
+                        -- Remove any HTML/rich text tags
+                        local cleanText = text:gsub("<[^>]+>", "")
+                        debugPrint("Cleaned text: '"..cleanText.."'")
+                        
+                        -- Try to find time pattern MM:SS
+                        local timeStr = cleanText:match("(%d+):(%d+)")
+                        if timeStr then
+                            debugPrint("Time string extracted: '"..timeStr.."'")
+                            
+                            local seconds = parseTime(timeStr)
+                            if seconds then
+                                debugPrint(string.format("✅ Parsed time successfully: %s = %d seconds = %d:%02d", 
+                                    timeStr, 
+                                    seconds,
+                                    math.floor(seconds/60),
+                                    seconds%60
+                                ))
+                                return seconds
+                            else
+                                debugPrint("❌ parseTime returned nil for: '"..timeStr.."'")
+                            end
+                        else
+                            debugPrint("⚠️ Found CELESTIAL label but no time pattern in: '"..cleanText.."'")
                         end
                     end
                 end
@@ -262,29 +381,29 @@ local function getCelestialTimer()
 end
 
 -- ==========================================
--- SMART SERVER HOPPER WITH CACHING & RATE LIMITING
+-- SMART SERVER HOPPER WITH WORKSPACE CACHING
 -- ==========================================
 local function hopServer()
     debugPrint("Searching for lowest population servers (unlimited attempts)...")
     local attempts = 0
     local lastRequestTime = 0
     local REQUEST_DELAY = 3 -- increased delay between requests
-    local CACHE_DURATION = 120 -- cache servers for 2 minutes
 
     while true do -- infinite loop for unlimited searches
         attempts = attempts + 1
-        debugPrint(string.format("Search attempt #%d", attempts))
+        debugPrint(string.format("========== Search attempt #%d ==========", attempts))
         
         local serverList = {}
         local needsRefetch = false
         
-        -- Check if we need to refetch or can use cache
-        local timeSinceCache = tick() - getgenv().LastCacheTime
-        if #getgenv().CachedServerList > 0 and timeSinceCache < CACHE_DURATION then
-            debugPrint(string.format("Using cached server list (%d servers, %.0fs old)", #getgenv().CachedServerList, timeSinceCache))
-            serverList = getgenv().CachedServerList
+        -- Try to load from workspace cache first
+        local cachedServers = loadServersFromCache()
+        
+        if cachedServers and #cachedServers > 0 then
+            debugPrint(string.format("Using cached server list (%d servers)", #cachedServers))
+            serverList = cachedServers
         else
-            debugPrint("Cache expired or empty, fetching fresh server list...")
+            debugPrint("No valid cache found. Fetching fresh server list from API...")
             needsRefetch = true
         end
         
@@ -294,8 +413,7 @@ local function hopServer()
             local pageNumber = 0
             local totalFetched = 0
             local maxPages = 10 -- limit pages to avoid too many requests
-            
-            getgenv().CachedServerList = {} -- clear old cache
+            local freshServers = {}
             
             repeat
                 pageNumber = pageNumber + 1
@@ -305,13 +423,13 @@ local function hopServer()
                     break
                 end
                 
-                debugPrint(string.format("Fetching page %d (limit: %d servers per page)", pageNumber, SERVER_LIMIT))
+                debugPrint(string.format("📡 Fetching page %d (limit: %d servers per page)", pageNumber, SERVER_LIMIT))
                 
                 -- Rate limiting protection
                 local timeSinceLastRequest = tick() - lastRequestTime
                 if timeSinceLastRequest < REQUEST_DELAY then
                     local waitTime = REQUEST_DELAY - timeSinceLastRequest
-                    debugPrint(string.format("Rate limit protection: waiting %.1fs", waitTime))
+                    debugPrint(string.format("⏳ Rate limit protection: waiting %.1fs", waitTime))
                     task.wait(waitTime)
                 end
                 
@@ -338,7 +456,7 @@ local function hopServer()
                         task.wait(RATE_LIMIT_WAIT)
                         break -- Break out to retry from beginning
                     else
-                        debugPrint("Waiting 15s before retry...")
+                        debugPrint(string.format("Waiting %ds before retry...", RETRY_DELAY))
                         task.wait(RETRY_DELAY)
                         break
                     end
@@ -351,45 +469,44 @@ local function hopServer()
 
                 if not parseSuccess or not data then
                     debugPrint("❌ Failed to parse JSON response")
-                    debugPrint("Waiting 15s before retry...")
+                    debugPrint(string.format("Waiting %ds before retry...", RETRY_DELAY))
                     task.wait(RETRY_DELAY)
                     break
                 end
 
                 if not data.data then
                     debugPrint("❌ Invalid response structure (no 'data' field)")
-                    debugPrint("Waiting 15s before retry...")
+                    debugPrint(string.format("Waiting %ds before retry...", RETRY_DELAY))
                     task.wait(RETRY_DELAY)
                     break
                 end
 
-                debugPrint(string.format("Page %d loaded: %d servers found", pageNumber, #data.data))
+                debugPrint(string.format("✅ Page %d loaded: %d servers found", pageNumber, #data.data))
                 
-                -- Add servers to cache
+                -- Add servers to fresh list
                 for _, server in ipairs(data.data) do
-                    table.insert(getgenv().CachedServerList, server)
+                    table.insert(freshServers, server)
                     totalFetched = totalFetched + 1
                 end
 
                 cursor = data.nextPageCursor
                 
                 if cursor then
-                    debugPrint(string.format("nextPageCursor found, will fetch page %d...", pageNumber + 1))
+                    debugPrint(string.format("➡️ nextPageCursor found, will fetch page %d...", pageNumber + 1))
                     task.wait(1) -- Wait between pagination requests
                 else
-                    debugPrint("No nextPageCursor - reached end of server list")
+                    debugPrint("🏁 No nextPageCursor - reached end of server list")
                 end
                 
             until not cursor
             
             if totalFetched > 0 then
-                debugPrint(string.format("✅ Cached %d servers total", totalFetched))
-                getgenv().LastCacheTime = tick()
-                serverList = getgenv().CachedServerList
+                debugPrint(string.format("✅ Fetched %d servers total from API", totalFetched))
+                saveServersToCache(freshServers)
+                serverList = freshServers
             else
-                debugPrint("❌ No servers fetched, waiting before retry...")
+                debugPrint(string.format("❌ No servers fetched, waiting %ds before retry...", RETRY_DELAY))
                 task.wait(RETRY_DELAY)
-                -- Continue to next attempt
                 continue
             end
         end
@@ -399,7 +516,7 @@ local function hopServer()
         local lowestPlayers = math.huge
         local serversChecked = 0
         
-        debugPrint(string.format("Scanning %d servers for low population (1-%d players)...", #serverList, MAX_PLAYERS))
+        debugPrint(string.format("🔍 Scanning %d servers for low population (%d-%d players)...", #serverList, MIN_PLAYERS, MAX_PLAYERS))
         
         for _, server in ipairs(serverList) do
             local playerCount = server.playing or 0
@@ -412,11 +529,11 @@ local function hopServer()
                 
                 bestServer = server
                 lowestPlayers = playerCount
-                debugPrint(string.format("Found candidate: %s (%d players)", server.id:sub(1,8).."...", playerCount))
+                debugPrint(string.format("⭐ Found candidate: %s (%d players)", server.id:sub(1,8).."...", playerCount))
             end
         end
 
-        debugPrint(string.format("Checked %d servers from list", serversChecked))
+        debugPrint(string.format("📊 Checked %d servers from list", serversChecked))
 
         -- If we found a suitable server, teleport to it
         if bestServer then
@@ -442,10 +559,9 @@ local function hopServer()
                 return -- Successfully initiated teleport
             end
         else
-            debugPrint(string.format("❌ No suitable server found in cached list (1-%d players)", MAX_PLAYERS))
+            debugPrint(string.format("❌ No suitable server found in list (%d-%d players)", MIN_PLAYERS, MAX_PLAYERS))
             debugPrint("Clearing cache to fetch fresh servers...")
-            getgenv().CachedServerList = {} -- Clear cache to force refetch
-            getgenv().LastCacheTime = 0
+            clearCache()
             debugPrint(string.format("Waiting %ds before retry...", RETRY_DELAY))
             task.wait(RETRY_DELAY)
         end
@@ -474,13 +590,33 @@ pcall(setupReconnect) -- Setup disconnect handler
 task.wait(2) -- Initial delay to ensure workspace is loaded
 
 debugPrint("Checking for celestial timer...")
+debugPrint("Current server JobId: "..game.JobId)
+
 local timer = getCelestialTimer()
 
 if timer then
-    getgenv().CelestialTimer = timer
+    debugPrint(string.format("✅ Timer found in this server: %d seconds (%d minutes %d seconds)", 
+        timer, 
+        math.floor(timer/60), 
+        timer%60
+    ))
+    
+    -- Send webhook for EVERY timer found
+    debugPrint("Sending webhook notification for this timer...")
     sendWebhook(timer, game.JobId)
-    debugPrint("Timer found and webhook sent! Continuing to search other servers...")
-    task.wait(2) -- Brief delay before hopping
+    
+    -- Update global state
+    getgenv().CelestialTimer = timer
+    
+    -- Track best timer for logging purposes
+    if not getgenv().BestTimerFound or timer < getgenv().BestTimerFound then
+        getgenv().BestTimerFound = timer
+        getgenv().BestTimerJobId = game.JobId
+        debugPrint(string.format("This is now the best timer found: %d seconds", timer))
+    end
+    
+    debugPrint("Continuing to search other servers...")
+    task.wait(2)
     hopServer()
 else
     debugPrint("No timer in this server, hopping to next...")
