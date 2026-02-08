@@ -9,7 +9,7 @@ local MAX_SERVER_SEARCHES = math.huge -- unlimited searches
 local PLACE_ID = 131623223084840
 local MIN_PLAYERS = 1 -- minimum players to consider a server
 local MAX_PLAYERS = 6 -- maximum players for "lowest possible server"
-local RETRY_DELAY = 19 -- seconds to wait before retrying
+local RETRY_DELAY = 20 -- seconds to wait before retrying
 
 -- ==========================================
 -- SERVICES
@@ -79,75 +79,143 @@ local function getJoinLink(jobId)
     return string.format("https://www.roblox.com/games/%d?privateServerLinkCode=%s", PLACE_ID, jobId)
 end
 
+-- Test function to verify webhook works
+local function testWebhook()
+    debugPrint("🧪 Testing webhook connection...")
+    
+    local testPayload = {
+        content = "✅ **Webhook Test Successful!**",
+        embeds = {{
+            title = "🔧 Connection Test",
+            description = "If you see this message, your webhook is working correctly!",
+            color = 65280, -- Green
+            fields = {
+                {
+                    name = "Status",
+                    value = "Connected ✅",
+                    inline = true
+                }
+            },
+            timestamp = os.date("!%Y-%m-%dT%H:%M:%S")
+        }}
+    }
+    
+    local requestFunc = request or http_request or (syn and syn.request)
+    
+    if requestFunc then
+        local success, result = pcall(function()
+            return requestFunc({
+                Url = WEBHOOK_URL,
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode(testPayload)
+            })
+        end)
+        
+        if success then
+            debugPrint("✅ Test webhook sent! Check your Discord channel.")
+            if result and result.StatusCode then
+                debugPrint("Status Code: "..result.StatusCode)
+            end
+        else
+            debugPrint("❌ Test webhook failed: "..(result or "unknown"))
+        end
+    else
+        debugPrint("❌ No request function available")
+    end
+end
+
+-- Uncomment the line below to test webhook before running main script
+-- testWebhook()
+
 local function sendWebhook(eventTime, jobId)
     debugPrint("Attempting to send webhook with timer: "..eventTime.."s left")
     
     local timeStr = string.format("%02d:%02d", math.floor(eventTime/60), eventTime%60)
     local joinLink = string.format("roblox://placeId=%d&gameInstanceId=%s", PLACE_ID, jobId)
     
+    -- Simplified payload without components (more compatible)
     local payload = {
+        content = "🔔 **Celestial Timer Found!**",
         embeds = {{
-            title = "⏰ Celestial Timer Found!",
-            description = string.format("**Time Remaining:** `%s`\n**Server ID:** `%s`", timeStr, jobId),
-            color = 0x8b5cf6,
+            title = "⏰ Celestial Event Timer",
+            description = string.format("**Time Remaining:** `%s`\n\n**🎮 Join Server:**\n```%s```\n\n**Server ID:** `%s`", 
+                timeStr, 
+                joinLink,
+                jobId:sub(1, 16).."..."
+            ),
+            color = 9055471, -- Purple color (0x8a5cf6 converted to decimal)
             fields = {
                 {
-                    name = "📍 Server Info",
-                    value = string.format("Players: %d\nServer: %s", #Players:GetPlayers(), game.JobId:sub(1, 8).."..."),
+                    name = "📊 Server Stats",
+                    value = string.format("• Players: %d\n• Ping: Active\n• Server: %s", 
+                        #Players:GetPlayers(), 
+                        game.JobId:sub(1, 8).."..."
+                    ),
+                    inline = true
+                },
+                {
+                    name = "⏱️ Timer Info",
+                    value = string.format("• Minutes: %d\n• Seconds: %d", 
+                        math.floor(eventTime/60), 
+                        eventTime%60
+                    ),
                     inline = true
                 }
             },
             footer = { 
-                text = "Celestial Timer Finder • Click button below to join",
-                icon_url = "https://cdn.discordapp.com/emojis/1234567890.png"
+                text = "Celestial Timer Finder • Copy the roblox:// link above"
             },
             timestamp = os.date("!%Y-%m-%dT%H:%M:%S")
-        }},
-        components = {{
-            type = 1,
-            components = {{
-                type = 2,
-                style = 5, -- Link button (external)
-                label = "🎮 Join Server",
-                url = joinLink
-            }}
         }}
     }
 
+    local jsonPayload = HttpService:JSONEncode(payload)
+    debugPrint("JSON Payload: "..jsonPayload:sub(1, 200).."...")
+
     -- Try multiple request methods
     local requestFunc = nil
+    local requestName = "unknown"
     
     if request then
         requestFunc = request
-        debugPrint("Using request() function")
+        requestName = "request"
     elseif http_request then
         requestFunc = http_request
-        debugPrint("Using http_request() function")
+        requestName = "http_request"
     elseif syn and syn.request then
         requestFunc = syn.request
-        debugPrint("Using syn.request() function")
+        requestName = "syn.request"
     end
     
+    debugPrint("Using request function: "..requestName)
+    
     if requestFunc then
-        local success, err = pcall(function()
-            local response = requestFunc({
+        local success, result = pcall(function()
+            return requestFunc({
                 Url = WEBHOOK_URL,
                 Method = "POST",
                 Headers = { 
                     ["Content-Type"] = "application/json"
                 },
-                Body = HttpService:JSONEncode(payload)
+                Body = jsonPayload
             })
-            debugPrint("Webhook response: "..(response and "Success" or "No response"))
         end)
         
         if success then
             debugPrint("✅ Webhook sent successfully!")
+            if result then
+                debugPrint("Response: "..tostring(result.StatusCode or "No status code"))
+                if result.Body then
+                    debugPrint("Body: "..result.Body:sub(1, 100))
+                end
+            end
         else
-            debugPrint("❌ Webhook failed: "..(err or "unknown error"))
+            debugPrint("❌ Webhook request failed: "..(result or "unknown error"))
         end
     else
-        debugPrint("❌ No HTTP request function available! Tried: request, http_request, syn.request")
+        debugPrint("❌ No HTTP request function available!")
+        debugPrint("Make sure your executor supports: request, http_request, or syn.request")
     end
 end
 
