@@ -5,10 +5,11 @@
 -- 🔧 CONFIG
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1470016492392419391/Hi4VRzHwtnggE-AmygcE5jJEl7goOcaMSUM-2uFPWvbCwifEiaZAm2Dc0uMjCqh6OC8j"
 local SCRIPT_RAW_URL = "https://raw.githubusercontent.com/enroo1212-eng/omg/refs/heads/main/main.lua"
-local MAX_SERVER_SEARCHES = 10 -- increased retry count
+local MAX_SERVER_SEARCHES = math.huge -- unlimited searches
 local PLACE_ID = 131623223084840
 local MIN_PLAYERS = 1 -- minimum players to consider a server
-local MAX_PLAYERS = 5 -- maximum players for "lowest possible server"
+local MAX_PLAYERS = 4 -- maximum players for "lowest possible server"
+local RETRY_DELAY = 15 -- seconds to wait before retrying
 
 -- ==========================================
 -- SERVICES
@@ -79,7 +80,7 @@ local function getJoinLink(jobId)
 end
 
 local function sendWebhook(eventTime, jobId)
-    debugPrint("Sending webhook with timer: "..eventTime.."s left")
+    debugPrint("Attempting to send webhook with timer: "..eventTime.."s left")
     
     local timeStr = string.format("%02d:%02d", math.floor(eventTime/60), eventTime%60)
     local joinLink = string.format("roblox://placeId=%d&gameInstanceId=%s", PLACE_ID, jobId)
@@ -113,23 +114,40 @@ local function sendWebhook(eventTime, jobId)
         }}
     }
 
-    local req = syn and syn.request or http_request or request
-    if req then
+    -- Try multiple request methods
+    local requestFunc = nil
+    
+    if request then
+        requestFunc = request
+        debugPrint("Using request() function")
+    elseif http_request then
+        requestFunc = http_request
+        debugPrint("Using http_request() function")
+    elseif syn and syn.request then
+        requestFunc = syn.request
+        debugPrint("Using syn.request() function")
+    end
+    
+    if requestFunc then
         local success, err = pcall(function()
-            req({
+            local response = requestFunc({
                 Url = WEBHOOK_URL,
                 Method = "POST",
-                Headers = { ["Content-Type"] = "application/json" },
+                Headers = { 
+                    ["Content-Type"] = "application/json"
+                },
                 Body = HttpService:JSONEncode(payload)
             })
+            debugPrint("Webhook response: "..(response and "Success" or "No response"))
         end)
+        
         if success then
-            debugPrint("Webhook sent successfully!")
+            debugPrint("✅ Webhook sent successfully!")
         else
-            debugPrint("Webhook failed: "..(err or "unknown error"))
+            debugPrint("❌ Webhook failed: "..(err or "unknown error"))
         end
     else
-        debugPrint("No HTTP request function available for webhook")
+        debugPrint("❌ No HTTP request function available! Tried: request, http_request, syn.request")
     end
 end
 
@@ -171,12 +189,15 @@ end
 -- SMART SERVER HOPPER WITH RATE LIMITING
 -- ==========================================
 local function hopServer()
-    debugPrint("Searching for lowest population servers...")
-    local retries = 0
+    debugPrint("Searching for lowest population servers (unlimited attempts)...")
+    local attempts = 0
     local lastRequestTime = 0
     local REQUEST_DELAY = 2 -- seconds between API requests to avoid rate limiting
 
-    while retries < MAX_SERVER_SEARCHES do
+    while true do -- infinite loop for unlimited searches
+        attempts = attempts + 1
+        debugPrint(string.format("Search attempt #%d", attempts))
+        
         local cursor = nil
         local bestServer = nil
         local lowestPlayers = math.huge
@@ -203,13 +224,14 @@ local function hopServer()
             end)
 
             if not success then
-                debugPrint("API request failed, waiting before retry...")
-                task.wait(5) -- longer wait on failure
+                debugPrint("API request failed, waiting 15s before retry...")
+                task.wait(RETRY_DELAY)
                 break
             end
 
             if not data or not data.data then
-                debugPrint("Invalid response from API")
+                debugPrint("Invalid response from API, waiting 15s...")
+                task.wait(RETRY_DELAY)
                 break
             end
 
@@ -238,7 +260,7 @@ local function hopServer()
 
         -- If we found a suitable server, teleport to it
         if bestServer then
-            debugPrint(string.format("Found optimal server: %s (%d players)", 
+            debugPrint(string.format("✅ Found optimal server: %s (%d players)", 
                 bestServer.id:sub(1, 8).."...", lowestPlayers))
             
             getgenv().VisitedServers[bestServer.id] = true
@@ -253,28 +275,17 @@ local function hopServer()
                 debugPrint("Teleport failed: "..(teleportErr or "unknown"))
                 getgenv().FailedAttempts = getgenv().FailedAttempts + 1
                 
-                -- If too many failures, wait longer
-                if getgenv().FailedAttempts > 3 then
-                    debugPrint("Multiple teleport failures, waiting 10s...")
-                    task.wait(10)
-                end
+                debugPrint(string.format("Waiting %ds before next attempt...", RETRY_DELAY))
+                task.wait(RETRY_DELAY)
             else
+                debugPrint("Teleport initiated successfully!")
                 return -- Successfully initiated teleport
             end
+        else
+            debugPrint(string.format("No suitable server found (1-%d players). Waiting %ds before retry...", MAX_PLAYERS, RETRY_DELAY))
+            task.wait(RETRY_DELAY)
         end
-
-        retries = retries + 1
-        debugPrint(string.format("Retry %d/%d - no suitable server found", retries, MAX_SERVER_SEARCHES))
-        task.wait(3) -- wait between retry attempts
     end
-
-    debugPrint("Exhausted all retry attempts. Trying fallback teleport...")
-    
-    -- Fallback: just teleport to the place without specific instance
-    pcall(function()
-        queueSelf()
-        TeleportService:Teleport(PLACE_ID, LocalPlayer)
-    end)
 end
 
 -- ==========================================
