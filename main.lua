@@ -10,7 +10,7 @@ local MAX_SERVER_SEARCHES = math.huge -- unlimited searches
 local PLACE_ID = 131623223084840
 local MIN_PLAYERS = 1 -- minimum players to consider a server
 local MAX_PLAYERS = 6 -- maximum players for "lowest possible server"
-local RETRY_DELAY = 18 -- seconds to wait before retrying
+local RETRY_DELAY = 15 -- seconds to wait before retrying
 local SERVER_LIMIT = 100 -- back to 100 since rate limits apply regardless
 local RATE_LIMIT_WAIT = 60 -- wait 60 seconds if we get 429 error
 
@@ -31,6 +31,15 @@ getgenv().FailedAttempts = getgenv().FailedAttempts or 0
 getgenv().BestTimerFound = getgenv().BestTimerFound or nil
 getgenv().BestTimerJobId = getgenv().BestTimerJobId or nil
 getgenv().VisitedServers[game.JobId] = true
+
+-- ==========================================
+-- DEBUG
+-- ==========================================
+local function debugPrint(msg)
+    print("[CelestialFinder] "..msg)
+end
+
+debugPrint("Script started on JobId: "..game.JobId)
 
 -- ==========================================
 -- SERVER CACHE SYSTEM (STORED IN WORKSPACE)
@@ -123,15 +132,6 @@ local function clearCache()
     debugPrint("🗑️ Clearing server cache...")
     ServerCacheFolder:ClearAllChildren()
 end
-
--- ==========================================
--- DEBUG
--- ==========================================
-local function debugPrint(msg)
-    print("[CelestialFinder] "..msg)
-end
-
-debugPrint("Script started on JobId: "..game.JobId)
 
 -- ==========================================
 -- SELF QUEUE
