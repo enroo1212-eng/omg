@@ -1,11 +1,10 @@
 -- ==========================================
--- FULL SELF-QUEUING EVENT TRACKER + SERVER HOP (WITH DEBUG)
+-- CELESTIAL TIMER GRAB + SERVER HOP + SELF QUEUE
 -- ==========================================
 
 -- 🔧 CONFIG
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1470016492392419391/Hi4VRzHwtnggE-AmygcE5jJEl7goOcaMSUM-2uFPWvbCwifEiaZAm2Dc0uMjCqh6OC8j"
-local ALERT_TIME = 120 -- seconds (2 minutes)
-local SCRIPT_RAW_URL = "https://raw.githubusercontent.com/enroo1212-eng/omg/refs/heads/main/main.lua" -- this script raw URL
+local SCRIPT_RAW_URL = "https://raw.githubusercontent.com/enroo1212-eng/omg/refs/heads/main/main.lua"
 
 -- ==========================================
 -- SERVICES
@@ -19,7 +18,7 @@ local LocalPlayer = Players.LocalPlayer
 -- GLOBAL STATE
 -- ==========================================
 getgenv().VisitedServers = getgenv().VisitedServers or {}
-getgenv().AlertSent = getgenv().AlertSent or false
+getgenv().CelestialTimer = getgenv().CelestialTimer or nil -- stores latest timer in seconds
 
 -- mark current server as visited
 getgenv().VisitedServers[game.JobId] = true
@@ -28,13 +27,13 @@ getgenv().VisitedServers[game.JobId] = true
 -- DEBUG FUNCTION
 -- ==========================================
 local function debugPrint(msg)
-    print("[EventTracker] "..msg)
+    print("[CelestialFinder] "..msg)
 end
 
 debugPrint("Script started on JobId: "..game.JobId)
 
 -- ==========================================
--- SELF QUEUE ON TELEPORT
+-- SELF QUEUE
 -- ==========================================
 local function queueSelf()
     if queue_on_teleport then
@@ -47,7 +46,7 @@ local function queueSelf()
         debugPrint("queue_on_teleport not supported")
     end
 end
-queueSelf() -- queue immediately
+queueSelf()
 
 -- ==========================================
 -- UTILITIES
@@ -58,28 +57,16 @@ local function parseTime(text)
     return tonumber(m) * 60 + tonumber(s)
 end
 
-local function getJoinLink()
-    return ("roblox://placeId=%d&gameInstanceId=%s"):format(game.PlaceId, game.JobId)
-end
-
-local function sendWebhook(eventName, secondsLeft)
-    if getgenv().AlertSent then return end
-    getgenv().AlertSent = true
-
+local function sendWebhook(eventTime)
+    debugPrint("Sending webhook with timer: "..eventTime.."s left")
     local payload = {
         embeds = {{
-            title = "⏰ Event Starting Soon",
-            description = "**"..eventName.."**",
+            title = "⏰ Celestial Timer Found",
+            description = "Time remaining: "..string.format("%02d:%02d", eventTime/60, eventTime%60),
             color = 0x8b5cf6,
-            fields = {
-                { name = "⏱ Time Left", value = string.format("%02d:%02d", secondsLeft/60, secondsLeft%60), inline = true },
-                { name = "🎮 Join Server", value = "[Click to Join](" .. getJoinLink() .. ")", inline = false }
-            },
-            footer = { text = "Automated Event Tracker" }
+            footer = { text = "Celestial Timer Grabber" }
         }}
     }
-
-    debugPrint("Sending webhook for event: "..eventName.." ("..secondsLeft.."s left)")
 
     local req = syn and syn.request or http_request or request
     if req then
@@ -89,59 +76,56 @@ local function sendWebhook(eventName, secondsLeft)
             Headers = { ["Content-Type"] = "application/json" },
             Body = HttpService:JSONEncode(payload)
         })
-    else
-        debugPrint("Executor does not support HTTP requests.")
     end
 end
 
 -- ==========================================
--- WATCH EVENT TIMERS
+-- GET CELESTIAL TIMER
 -- ==========================================
-local function watchEventTimers()
-    debugPrint("Looking for EventTimers in workspace...")
-    local EventTimers = workspace:WaitForChild("EventTimers", 10)
+local function getCelestialTimer()
+    local EventTimers = workspace:FindFirstChild("EventTimers")
     if not EventTimers then
-        debugPrint("No EventTimers found in workspace.")
-        return false
+        debugPrint("No EventTimers folder found.")
+        return nil
     end
 
     for _, obj in ipairs(EventTimers:GetChildren()) do
         local gui = obj:FindFirstChild("SurfaceGui")
         local frame = gui and gui:FindFirstChild("Frame")
-        local label = frame and frame:FindFirstChild("TextLabel2")
-        if label then
-            debugPrint("Found event label: "..label.Name)
-            local function check()
-                if getgenv().AlertSent then return end
-                local clean = label.Text:gsub("<[^>]+>", "")
-                local seconds = parseTime(clean)
-                if seconds and seconds <= ALERT_TIME then
-                    local eventName = clean:match("(.+)%sEVENT") or "EVENT"
-                    debugPrint("Event detected! Time left: "..seconds.."s, sending webhook.")
-                    sendWebhook(eventName, seconds)
+        if frame then
+            for _, label in ipairs(frame:GetChildren()) do
+                if label:IsA("TextLabel") and label.Text:match("CELESTIAL") then
+                    -- Remove RichText tags
+                    local cleanText = label.Text:gsub("<[^>]+>", "")
+                    -- Extract "APPEARS IN XX:XX"
+                    local timeStr = cleanText:match("APPEARS IN (%d%d:%d%d)")
+                    if timeStr then
+                        local seconds = parseTime(timeStr)
+                        if seconds then
+                            debugPrint("Found celestial timer: "..seconds.."s")
+                            return seconds
+                        end
+                    end
                 end
             end
-
-            check()
-            label:GetPropertyChangedSignal("Text"):Connect(check)
-            return true
         end
     end
-    debugPrint("No valid event labels found in this server.")
-    return false
+
+    debugPrint("No celestial timer found in this server.")
+    return nil
 end
 
 -- ==========================================
 -- SERVER HOPPER
 -- ==========================================
 local function hopServer()
-    debugPrint("Looking for servers to hop to...")
+    debugPrint("Searching for servers to hop to...")
     local url = ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100"):format(game.PlaceId)
     local success, data = pcall(function()
         return HttpService:JSONDecode(game:HttpGet(url))
     end)
     if not success or not data then
-        debugPrint("Failed to get server list")
+        debugPrint("Failed to fetch server list.")
         return
     end
 
@@ -165,13 +149,13 @@ end
 -- ==========================================
 -- MAIN FLOW
 -- ==========================================
-debugPrint("Starting main flow...")
-if not getgenv().AlertSent then
-    local foundTimer = watchEventTimers()
-    if not foundTimer then
-        debugPrint("No event found, attempting server hop...")
-        hopServer()
-    else
-        debugPrint("Event found, tracking timer...")
-    end
+local timer = getCelestialTimer()
+if timer then
+    getgenv().CelestialTimer = timer
+    sendWebhook(timer)
+    debugPrint("Timer saved globally, now hopping to next server...")
+    hopServer()
+else
+    debugPrint("No timer found, hopping to next server...")
+    hopServer()
 end
